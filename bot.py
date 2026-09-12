@@ -1,22 +1,62 @@
 import os
+import re
 import requests
 import time
 from datetime import datetime, date
 import pytz
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+
+def load_env_file(path=".env"):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+print(f"[Config] .env file exists: {os.path.exists('.env')}")
+if load_dotenv is not None:
+    loaded = load_dotenv(dotenv_path=".env", override=False)
+    print(f"[Config] python-dotenv loaded .env: {loaded}")
+else:
+    load_env_file()
+    print("[Config] python-dotenv not installed; fallback manual parse used.")
+
+print(f"[Config] ENV TELEGRAM_TOKEN present: {'YES' if os.environ.get('TELEGRAM_TOKEN') else 'NO'}")
+print(f"[Config] ENV TELEGRAM_CHAT_ID present: {'YES' if os.environ.get('TELEGRAM_CHAT_ID') else 'NO'}")
+print(f"[Config] ENV TWELVEDATA_API_KEY present: {'YES' if os.environ.get('TWELVEDATA_API_KEY') else 'NO'}")
+
 # ============================================
 # CONFIGURATION
 # ============================================
-TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")
-TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
+TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("CHAT_ID")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY") or os.environ.get("TWELVEDATA_KEY")
+
+if not TELEGRAM_TOKEN and TWELVEDATA_API_KEY and re.fullmatch(r"\d+:[A-Za-z0-9_-]+", TWELVEDATA_API_KEY):
+    print("[Config] Detected Telegram token-like value in TWELVEDATA_API_KEY; using it as TELEGRAM_TOKEN fallback.")
+    TELEGRAM_TOKEN = TWELVEDATA_API_KEY
+
+if not TELEGRAM_TOKEN:
+    print("[Config] WARNING: TELEGRAM_TOKEN is missing or empty. Check .env file.")
+if not TELEGRAM_CHAT_ID:
+    print("[Config] WARNING: TELEGRAM_CHAT_ID is missing or empty. Check .env file.")
 
 SYMBOL       = "XAU/USD"
 CAPITAL      = 200
 RISK_PERCENT = 0.05
 RISK_AMOUNT  = CAPITAL * RISK_PERCENT   # $10
 
-MAX_TRADES_PER_DAY = 3
+MAX_TRADES_PER_DAY = 10
 MIN_CONFIDENCE     = 65
 MIN_SL_DOLLARS     = 3.0
 MAX_SL_DOLLARS     = 20.0
@@ -24,7 +64,7 @@ MIN_FVG_SIZE       = 1.50   # minimum FVG gap in dollars to count
 EQUAL_LEVEL_TOL    = 0.30   # dollars — how close two highs/lows must be to count as "equal"
 IST                = pytz.timezone('Asia/Kolkata')
 
-PAPER_MODE = True
+PAPER_MODE = True  # Keep simulation mode active until explicitly changed by the user.
 
 # Gold contract: 1.00 lot = 100oz → $1 move = $100/lot → $1 move = $1 per 0.01 lot
 USD_PER_DOLLAR_MOVE_PER_001_LOT = 1.0
@@ -41,13 +81,31 @@ last_signal_time      = 0
 # TELEGRAM
 # ============================================
 def send_telegram(message):
-    url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[Telegram] Missing credentials. Telegram send skipped. Check TELEGRAM_TOKEN / TELEGRAM_CHAT_ID in .env.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    print(f"[Telegram] Sending message to {TELEGRAM_CHAT_ID} ...")
+    print(f"[Telegram] URL: {url}")
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram: {r.status_code}")
+        print(f"[Telegram] Status Code: {r.status_code}")
+        print(f"[Telegram] Response Body: {r.text[:1000]}")
+        try:
+            data = r.json()
+            if not data.get("ok", False):
+                print(f"[Telegram] API returned ok=False: {data}")
+                return False
+        except ValueError:
+            print("[Telegram] Response is not valid JSON.")
+            return False
+        print("[Telegram] Message sent successfully.")
+        return True
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"[Telegram] Exception: {e}")
+        return False
 
 # ============================================
 # FETCH CANDLES
@@ -660,7 +718,11 @@ def main():
     print(f"Capital: ${CAPITAL} | Risk/trade: ${RISK_AMOUNT:.2f} | "
           f"Min Confidence: {MIN_CONFIDENCE}%")
     print(f"Paper mode: {PAPER_MODE}")
+    print(f"Telegram token loaded: {'YES' if TELEGRAM_TOKEN else 'NO'}")
+    print(f"Telegram chat id loaded: {'YES' if TELEGRAM_CHAT_ID else 'NO'}")
+    print(f"Telegram URL target: https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage" if TELEGRAM_TOKEN else "Telegram URL target: missing token")
 
+    send_telegram("✅ Bot berhasil terhubung ke Telegram")
     send_telegram(
         f"🚀 <b>XAUUSD SMC Bot LIVE</b>\n\n"
         f"{'🧪 PAPER MODE' if PAPER_MODE else '⚡ LIVE MODE'}\n\n"
