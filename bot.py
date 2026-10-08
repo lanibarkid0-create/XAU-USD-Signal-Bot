@@ -1,9 +1,18 @@
 import os
 import re
 import requests
+import sys
 import time
-from datetime import datetime, date
+import json
+from datetime import datetime
 import pytz
+
+# Windows console (cp1252) tak bisa encode emoji → paksa UTF-8 agar tidak crash saat print.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 try:
     from dotenv import load_dotenv
@@ -57,14 +66,22 @@ RISK_PERCENT = 0.05
 RISK_AMOUNT  = CAPITAL * RISK_PERCENT   # $10
 
 MAX_TRADES_PER_DAY = 10
-MIN_CONFIDENCE     = 65
+MIN_CONFIDENCE     = 65   # ablation 69 hari: conf70 tidak mengungguli conf65 (beda dalam noise)
 MIN_SL_DOLLARS     = 3.0
-MAX_SL_DOLLARS     = 20.0
+MAX_SL_DOLLARS     = 20.0   # batas gila; yang menentukan layak/tidak adalah budget di calculate_lots
+OB_SCORE           = 0      # poin OB dinonaktifkan (validasi out-of-sample ob_validation.py:
+                            # tanpa poin OB unggul +32.5R & +4.5R di kedua paruh data).
+                            # Zona OB tetap dipakai untuk penempatan SL.
 MIN_FVG_SIZE       = 1.50   # minimum FVG gap in dollars to count
 EQUAL_LEVEL_TOL    = 0.30   # dollars — how close two highs/lows must be to count as "equal"
 IST                = pytz.timezone('Asia/Kolkata')
 
 PAPER_MODE = True  # Keep simulation mode active until explicitly changed by the user.
+
+# Filter sesi opsional — DIUJI lewat ablation.py (69 hari, lihat logs/ablation.log):
+# skip London justru menurunkan total R (+32R → +15R), jadi defaultnya kosong.
+# Isi dengan nama sesi (dari get_session) untuk menyalakan filter, mis. ["London Session 🇬🇧"]
+SKIP_SESSIONS = []
 
 # Gold contract: 1.00 lot = 100oz → $1 move = $100/lot → $1 move = $1 per 0.01 lot
 USD_PER_DOLLAR_MOVE_PER_001_LOT = 1.0
@@ -88,7 +105,7 @@ def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     print(f"[Telegram] Sending message to {TELEGRAM_CHAT_ID} ...")
-    print(f"[Telegram] URL: {url}")
+    print("[Telegram] Endpoint: api.telegram.org (token redacted)")
     try:
         r = requests.post(url, json=payload, timeout=10)
         print(f"[Telegram] Status Code: {r.status_code}")
@@ -460,13 +477,13 @@ def calculate_lots(sl_dollars):
     if sl_dollars <= 0:
         return 0.01, 0, False
     raw_lots = (RISK_AMOUNT / sl_dollars) * 0.01
-    lots     = round(raw_lots, 2)
-    if lots < 0.01:
-        return 0.01, round(sl_dollars * 1.0, 2), False
-    lots        = min(lots, 0.50)
+    # Floor to 2dp: rounding UP would inflate risk above the budget.
+    lots = max(0.01, int(raw_lots * 100) / 100)
+    lots = min(lots, 0.50)
     actual_risk = sl_dollars * (lots / 0.01) * USD_PER_DOLLAR_MOVE_PER_001_LOT
-    is_safe     = actual_risk <= RISK_AMOUNT * 2.0
-    return lots, round(actual_risk, 2), is_safe
+    # Reject when min lot (0.01) forces risk beyond the per-trade budget.
+    is_safe = actual_risk <= RISK_AMOUNT
+    return round(lots, 2), round(actual_risk, 2), is_safe
 
 # ============================================
 # MAIN SIGNAL ENGINE — FULL SMC STRATEGY
@@ -534,12 +551,12 @@ def generate_signal(candles_5m, candles_15m):
         short_score += 15
         short_reasons.append(f"M5 Bearish{' BOS' if m5_bos else ''}")
 
-    # Order block
-    if price_in_ob and tf_bias == "BULLISH":
-        long_score += 20
+    # Order block (lihat OB_SCORE — poin dimatikan, zona tetap dipakai untuk SL)
+    if OB_SCORE and price_in_ob and tf_bias == "BULLISH":
+        long_score += OB_SCORE
         long_reasons.append("Price in Bullish Order Block")
-    elif price_in_ob and tf_bias == "BEARISH":
-        short_score += 20
+    elif OB_SCORE and price_in_ob and tf_bias == "BEARISH":
+        short_score += OB_SCORE
         short_reasons.append("Price in Bearish Order Block")
 
     # Liquidity sweep (stop hunt then reversal)
@@ -694,18 +711,48 @@ def send_signal(sig):
 🕐 {now_ist}
 ⚠️ <i>Max {MAX_TRADES_PER_DAY} signals/day. Verify spread before acting.</i>"""
 
-    send_telegram(msg)
-    print(f"✅ Signal: {sig['signal']} @ {sig['price']} | "
+    ok = send_telegram(msg)
+    print(f"{'✅' if ok else '❌'} Signal {sig['signal']} @ {sig['price']} | "
           f"Conf: {sig['confidence']}% | Risk: ${sig['potential_loss']:.2f}")
+    log_signal(sig, ok)
+    return ok
+
+def log_signal(sig, sent):
+    """Append sinyal ke logs/signals.jsonl agar riwayat selamat dari restart/log cloud."""
+    try:
+        os.makedirs("logs", exist_ok=True)
+        record = {
+            "timestamp": datetime.now(pytz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "symbol": SYMBOL, "direction": sig["signal"],
+            "confidence": sig["confidence"], "price": sig["price"],
+            "sl_dollars": sig["sl_dollars"], "tp_dollars": sig["tp_dollars"],
+            "lots": sig["lots"], "risk_dollars": sig["potential_loss"],
+            "reasons": sig["reasons"], "session": get_session(),
+            "paper_mode": PAPER_MODE, "sent_ok": sent,
+        }
+        with open(os.path.join("logs", "signals.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[Log] Gagal tulis signals.jsonl: {e}")
+
 
 # ============================================
 # SESSION LABEL
 # ============================================
-def get_session():
-    h = datetime.now(IST).hour
-    if 5  <= h < 9:  return "Asian Session 🌏"
-    if 13 <= h < 18: return "London Session 🇬🇧"
-    if 18 <= h < 23: return "New York Session 🗽"
+def get_session(dt=None):
+    """Label sesi berdasarkan jam IST. dt=None → sekarang (untuk backtest: beri waktu historis)."""
+    now = dt if dt is not None else datetime.now(IST)
+    if now.tzinfo is None:
+        now = IST.localize(now)
+    h = now.hour + now.minute / 60.0
+    # Jam sesi nyata (IST = UTC+5:30): London 07:00-16:00 UTC = 12:30-21:30 IST
+    #                                 NY     12:00-21:00 UTC = 17:30-02:30 IST
+    if 12.5 <= h < 17.5:
+        return "London Session 🇬🇧"
+    if h >= 17.5 or h < 2.5:
+        return "New York Session 🗽"
+    if 5.0 <= h < 12.5:
+        return "Asian Session 🌏"
     return "Off Hours 🌙"
 
 # ============================================
@@ -720,7 +767,6 @@ def main():
     print(f"Paper mode: {PAPER_MODE}")
     print(f"Telegram token loaded: {'YES' if TELEGRAM_TOKEN else 'NO'}")
     print(f"Telegram chat id loaded: {'YES' if TELEGRAM_CHAT_ID else 'NO'}")
-    print(f"Telegram URL target: https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage" if TELEGRAM_TOKEN else "Telegram URL target: missing token")
 
     send_telegram("✅ Bot berhasil terhubung ke Telegram")
     send_telegram(
@@ -738,7 +784,7 @@ def main():
     while True:
         try:
             now   = datetime.now(IST)
-            today = date.today()
+            today = now.date()  # konsisten dengan zona logika (IST), bukan zona server
 
             if last_trade_date != today:
                 trades_today = 0
@@ -773,16 +819,23 @@ def main():
 
             sig = generate_signal(candles_5m, candles_15m)
 
+            if sig and session in SKIP_SESSIONS:
+                print(f"Signal {sig['signal']} dropped — {session} is in SKIP_SESSIONS.")
+                sig = None
+
             if sig:
                 now_ts = time.time()
                 if (last_signal_direction == sig["signal"] and
                         now_ts - last_signal_time < 2700):
                     print("Same direction within 45min — skipping.")
                 else:
-                    send_signal(sig)
-                    trades_today         += 1
-                    last_signal_time      = now_ts
-                    last_signal_direction = sig["signal"]
+                    if send_signal(sig):
+                        # hanya makan kuota harian kalau kirim benar-benar sukses
+                        trades_today         += 1
+                        last_signal_time      = now_ts
+                        last_signal_direction = sig["signal"]
+                    else:
+                        print("Signal NOT sent (Telegram failed) — quota not consumed.")
                     if trades_today >= MAX_TRADES_PER_DAY:
                         send_telegram(
                             f"🔴 <b>Daily Limit Reached</b>\n"

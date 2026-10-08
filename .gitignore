@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Local run artifacts (backtest logs, signal journal, cached market data)
+logs/
+
 # C extensions
 *.so
 

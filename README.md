@@ -26,7 +26,7 @@
 
 ## 🧠 About the Project
 
-This bot monitors the **XAU/USD (Gold)** forex market autonomously 24/5. Rather than relying on lagging indicators, it implements core **Smart Money Concepts (SMC)** logic. It processes `1-Hour` candles to determine the macro bias and `5-Minute` candles to isolate surgical entry triggers. 
+This bot monitors the **XAU/USD (Gold)** forex market autonomously 24/5. Rather than relying on lagging indicators, it implements core **Smart Money Concepts (SMC)** logic. It processes `15-Minute` candles to determine the macro bias and `5-Minute` candles to isolate surgical entry triggers. 
 
 When a confluence of signals aligns with strict risk-management parameters, it formats a comprehensive report detailing the entry, exact stop loss, take profit, and the precise reasoning behind the trade—delivered instantly to your Telegram.
 
@@ -36,7 +36,7 @@ When a confluence of signals aligns with strict risk-management parameters, it f
 
 The bot scores potential trade setups out of 100 based on multiple confluences:
 
-1. **Market Structure (BOS / CHoCH)**: Analyzes the last 50 candles to map swing highs and lows.
+1. **Market Structure (BOS / CHoCH)**: Analyzes the last 60 candles to map swing highs and lows.
 2. **Liquidity Grabs**: Identifies aggressive wick rejections beyond recent extremes.
 3. **Fair Value Gaps (FVG)**: Detects impulsive momentum and structural imbalances.
 4. **Key S&R Levels**: Calculates dynamic Support and Resistance zones.
@@ -65,8 +65,8 @@ The bot scores potential trade setups out of 100 based on multiple confluences:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/YourUsername/GJsignal-bot.git
-   cd GJsignal-bot
+   git clone https://github.com/YourUsername/XAU-USD-Signal-Bot.git
+   cd XAU-USD-Signal-Bot
    ```
 
 2. **Install dependencies:**
@@ -77,10 +77,11 @@ The bot scores potential trade setups out of 100 based on multiple confluences:
 3. **Configure the script:**
    Inside `bot.py`, locate the Configuration block and update your risk settings:
    ```python
-   CAPITAL = 100               # Your exact real balance
-   RISK_PERCENT = 0.03         # 3% risk per trade
-   MAX_TRADES_PER_DAY = 2      # Quality over quantity
-   MIN_CONFIDENCE = 80         # Strict 80%+ confluence required
+   CAPITAL = 200               # Your exact real balance
+   RISK_PERCENT = 0.05         # 5% risk per trade ($10)
+   MAX_TRADES_PER_DAY = 10     # Daily signal cap
+   MIN_CONFIDENCE = 65         # Confluence threshold
+   SKIP_SESSIONS = []          # Optional session filter, e.g. ["London Session 🇬🇧"]
    PAPER_MODE = True           # Set False ONLY when ready for live execution
    ```
 
@@ -112,6 +113,21 @@ This repository includes a `railway.json` and `Procfile`.
 1. Link your GitHub repository to a new Railway project.
 2. Add your Environment Variables in the Railway Dashboard.
 3. The bot will deploy and run automatically.
+
+---
+
+## 🧪 Backtesting
+
+The repo ships with two validation tools (data is cached in `logs/backtest_cache/`, ~4 API credits per run on the TwelveData free plan):
+
+```bash
+python backtest.py --days 60   # bar-by-bar simulation of the live loop on real 5M/15M candles
+python ablation.py             # A/B compare config variants (confidence, session filter, sizing)
+```
+
+`backtest.py` replays `generate_signal()` exactly as the live bot calls it — same 100-bar windows, same cooldown/daily-limit/session filters — enters at the next bar's open, and resolves SL/TP using bar highs/lows (SL wins ties). Outputs: `logs/backtest_summary.json` and `logs/backtest_trades.jsonl`.
+
+> ⚠️ Results assume ~$0.40 round-trip spread/slippage is **not** included; the strategy's edge is thin after costs. Always keep `PAPER_MODE = True` until you have validated live.
 
 ---
 
